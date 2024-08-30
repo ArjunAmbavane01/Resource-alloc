@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pandemic Resource Allocation</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        #map {
+            height: 400px;
+            width: 100%;
+            max-width: 800px;
+            margin-bottom: 20px;
+        }
+
+        #inputs {
+            margin-bottom: 20px;
+        }
+
+        input {
+            margin: 5px;
+            padding: 5px;
+        }
+
+        button {
+            margin: 5px;
+            padding: 5px 10px;
+        }
+
+        #output {
+            max-width: 800px;
+            width: 100%;
+        }
+
+        #loading {
+            display: none;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Pandemic Resource Allocation</h1>
+    <div id="map"></div>
+    <div id="inputs">
+        <input type="number" id="vendor1" placeholder="Vendor 1 Masks">
+        <input type="number" id="vendor2" placeholder="Vendor 2 Masks">
+        <input type="number" id="vendor3" placeholder="Vendor 3 Masks">
+        <button onclick="updateAllocation()">Update Allocation</button>
+    </div>
+    <div id="output"></div>
+    <div id="loading">Calculating optimal allocation...</div>
+
+    <script>
+         const hospitals = [
+            { id: 1, name: "Jupiter,Baner", urgency: 5, requiredMasks: 15, location: { lon: 73.7858398, lat: 18.5661095 } },
+            { id: 2, name: "Sahyadri,Yerawada", urgency: 5, requiredMasks: 15, location: { lon: 73.8971383, lat: 18.5543086 } },
+            { id: 3, name: "Joglekar,Shivajinagar", urgency: 5, requiredMasks: 15, location: { lon: 73.8336359, lat: 18.5327524 } },
+            { id: 4, name: "Sathe,Kothrud", urgency: 5, requiredMasks: 15, location: { lon: 73.8037337, lat: 18.5067869 } },
+            { id: 5, name: "Golden Care,PCMC", urgency: 5, requiredMasks: 15, location: { lon: 73.7476511, lat: 18.6020756 } },
+        ];
+
+        const vendors = [
+            { id: 1, name: "IISER", availableMasks: 20, location: { lon: 73.8094712, lat: 18.5498538 } },
+            { id: 2, name: "Phinix Elina", availableMasks: 20, location: { lon: 73.7419084, lat: 18.5565341 } },
+            { id: 3, name: "Gopal Highschool", availableMasks: 30, location: { lon: 73.8515638, lat: 18.5105005 } }
+        ];
+
+        let map = L.map('map').setView([18.5543086, 73.8971383], 11);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        async function getRouteData(start, end) {
+            const apiKey = '5b3ce3597851110001cf624841501944ea794b31a00631fa536910a9'; // Replace with your actual API key
+            const url = `https://api.openrouteservice.org/v2/directions/driving-car?api_key=${apiKey}&start=${start.lon},${start.lat}&end=${end.lon},${end.lat}`;
+
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                return {
+                    distance: data.features[0].properties.segments[0].distance,
+                    geometry: data.features[0].geometry.coordinates
+                };
+            } catch (error) {
+                console.error('Error fetching route data:', error);
+                return null;
+            }
+        }
+
+        async function distributeResources(hospitals, vendors) {
+            hospitals.sort((a, b) => b.urgency - a.urgency);
+
+            const totalAvailable = vendors.reduce((sum, v) => sum + v.availableMasks, 0);
+            const totalRequired = hospitals.reduce((sum, h) => sum + h.requiredMasks, 0);
+
+            const distribution = hospitals.map(hospital => ({
+                hospitalId: hospital.id,
+                allocations: [],
+                received: 0,
+                shortage: hospital.requiredMasks
+            }));
+
+            async function allocateMasks(hospital, vendor, amount) {
+                const actualAmount = Math.min(amount, hospital.requiredMasks - distribution.find(d => d.hospitalId === hospital.id).received);
+                const routeData = await getRouteData(hospital.location, vendor.location);
+
+                if (routeData === null) {
+                    console.error('Failed to get route data. Using straight-line distance as fallback.');
+                    // Fallback to straight-line distance
+                    const straightLineDistance = Math.sqrt(
+                        Math.pow(hospital.location.lon - vendor.location.lon, 2) +
+                        Math.pow(hospital.location.lat - vendor.location.lat, 2)
+                    );
+                    distribution.find(d => d.hospitalId === hospital.id).allocations.push({
+                        vendorId: vendor.id,
+                        amount: actualAmount,
+                        distance: straightLineDistance,
+                        geometry: [[hospital.location.lat, hospital.location.lon], [vendor.location.lat, vendor.location.lon]]
+                    });
+                } else {
+                    distribution.find(d => d.hospitalId === hospital.id).allocations.push({
+                        vendorId: vendor.id,
+                        amount: actualAmount,
+                        distance: routeData.distance,
+                        geometry: routeData.geometry.map(coord => [coord[1], coord[0]]) // Swap lon/lat for Leaflet
+                    });
+                }
+
+                distribution.find(d => d.hospitalId === hospital.id).received += actualAmount;
+                distribution.find(d => d.hospitalId === hospital.id).shortage -= actualAmount;
+                vendor.availableMasks -= actualAmount;
+            }
+
+            for (const hospital of hospitals) {
+                const initialAllocation = Math.floor(
+                    (hospital.requiredMasks / totalRequired) * totalAvailable
+                );
+
+                let remainingAllocation = initialAllocation;
+
+                for (const vendor of vendors) {
+                    if (remainingAllocation > 0 && vendor.availableMasks > 0) {
+                        const allocation = Math.min(remainingAllocation, vendor.availableMasks);
+                        await allocateMasks(hospital, vendor, allocation);
+                        remainingAllocation -= allocation;
+                    }
+                }
+            }
+
+            const remainingHospitals = hospitals.filter(
+                h => distribution.find(d => d.hospitalId === h.id).shortage > 0
+            );
+
+            for (const vendor of vendors) {
+                while (vendor.availableMasks > 0 && remainingHospitals.length > 0) {
+                    for (const hospital of remainingHospitals) {
+                        if (vendor.availableMasks > 0) {
+                            const allocation = Math.min(1, vendor.availableMasks);
+                            await allocateMasks(hospital, vendor, allocation);
+
+                            if (distribution.find(d => d.hospitalId === hospital.id).shortage === 0) {
+                                const index = remainingHospitals.indexOf(hospital);
+                                remainingHospitals.splice(index, 1);
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            return distribution;
+        }
+
+        async function updateAllocation() {
+            document.getElementById('loading').style.display = 'block';
+
+            vendors[0].availableMasks = parseInt(document.getElementById('vendor1').value) || 20;
+            vendors[1].availableMasks = parseInt(document.getElementById('vendor2').value) || 20;
+            vendors[2].availableMasks = parseInt(document.getElementById('vendor3').value) || 30;
+
+            try {
+                const distribution = await distributeResources(hospitals, vendors);
+
+                const output = document.getElementById('output');
+                output.innerHTML = '<h2>Allocation Results</h2>';
+                output.innerHTML += '<h3>Hospitals</h3>';
+
+                hospitals.forEach(hospital => {
+                    const hospitalDist = distribution.find(d => d.hospitalId === hospital.id);
+                    output.innerHTML += `
+                        <p>Hospital ${hospital.id} - Urgency: ${hospital.urgency}, Required Masks: ${hospital.requiredMasks}, Allocated Masks: ${hospitalDist.received}</p>
+                    `;
+                    hospitalDist.allocations.forEach(allocation => {
+                        output.innerHTML += `
+                            <p>Vendor ${allocation.vendorId} allocated ${allocation.amount} masks (Distance: ${allocation.distance.toFixed(2)} meters)</p>
+                        `;
+                    });
+                });
+
+                output.innerHTML += '<h3>Vendors</h3>';
+                vendors.forEach(vendor => {
+                    const allocatedMasks = distribution.reduce((sum, d) =>
+                        sum + d.allocations.filter(a => a.vendorId === vendor.id).reduce((s, a) => s + a.amount, 0), 0
+                    );
+                    output.innerHTML += `
+                        <p>Vendor ${vendor.id} - Available Masks: ${vendor.availableMasks + allocatedMasks}, Allocated Masks: ${allocatedMasks}</p>
+                    `;
+                });
+
+                updateMap(distribution);
+            } catch (error) {
+                console.error('Error updating allocation:', error);
+                document.getElementById('output').innerHTML = '<p>An error occurred while updating the allocation. Please try again.</p>';
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        function updateMap(distribution) {
+            map.eachLayer(layer => {
+                if (layer instanceof L.Marker || layer instanceof L.Polyline) {
+                    map.removeLayer(layer);
+                }
+            });
+
+            const vendorIcon = L.icon({
+                iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34],
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+                shadowSize: [41, 41]
+            });
+
+            const hospitalIcon = L.icon({
+                iconUrl: 'icons8-pharmacy-ios-17-glyph\\icons8-pharmacy-30.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34],
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+                shadowSize: [41, 41]
+            });
+
+            hospitals.forEach(hospital => {
+                L.marker([hospital.location.lat, hospital.location.lon], {icon: hospitalIcon})
+                    .addTo(map)
+                    .bindPopup(`Hospital ${hospital.id} <br> Urgency: ${hospital.urgency} <br> Required Masks: ${hospital.requiredMasks}`);
+            });
+
+            vendors.forEach(vendor => {
+                L.marker([vendor.location.lat, vendor.location.lon], { icon: vendorIcon })
+                    .addTo(map)
+                    .bindPopup(`Vendor ${vendor.id} <br> Available Masks: ${vendor.availableMasks}`);
+            });
+
+            distribution.forEach(d => {
+                const hospital = hospitals.find(h => h.id === d.hospitalId);
+                d.allocations.forEach(allocation => {
+                    if (allocation.amount > 0) {
+                        const vendor = vendors.find(v => v.id === allocation.vendorId);
+                        L.polyline(allocation.geometry, { color: 'blue', weight: 2 })
+                            .addTo(map)
+                            .bindPopup(`Allocation: ${allocation.amount} masks<br>Distance: ${allocation.distance.toFixed(2)} meters`);
+                    }
+                });
+            });
+        }
+
+        // Initial allocation
+        updateAllocation();
+    </script>
+</body>
+
+</html>
